@@ -821,7 +821,7 @@ class DockerManager(object):
             if conf_in_container_port in container_ports:
                 container_host_info = container_ports[conf_in_container_port]
                 #nullcheck when port is exposed in Dockerfile but not mapped to host
-                if null != container_host_info:
+                if container_host_info is not None:
                     if "auto" == conf_host_port:
                         #auto assigned host port, any entry is sufficient
                         found = True
@@ -860,10 +860,10 @@ class DockerManager(object):
 
         configuration_envs = self.module.params.get('env') or {};
 
-        for k,v in existing_container_envs.iteritems():
-            if not k in configuration_envs:
-                return True
-            if v != configuration_envs[k]:
+        for k,v in configuration_envs.iteritems():
+            if not k in existing_container_envs:
+                 return True
+            if v != existing_container_envs[k]:
                 return True
 
         return False
