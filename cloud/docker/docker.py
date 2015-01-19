@@ -774,6 +774,100 @@ class DockerManager(object):
 
         return containers
 
+    def named_container_changed(self, existing_container):
+        if not existing_container:
+            return False
+
+        return (self.image_changed(existing_container) or
+                self.env_changed(existing_container) or
+                self.vol_changed(existing_container) or
+                self.ports_changed(existing_container))
+
+    def ports_changed(self, existing_container):
+        if self.module.params.get('publish_all_ports'):
+            #when using publish_all_ports flag, we cannot determine if ports have changed, assume they didn't
+            return False
+        
+        container_net = existing_container.get('NetworkSettings', dict())
+        container_ports = (container_net.get('Ports', dict()) or {})
+        configuration_ports = (self.module.params.get('ports') or [])
+
+        # loop through each ansible config try to find a matching docker container entry
+        # return True if unable to match
+        for conf_port_entry in configuration_ports:
+            conf_port_entry_parts = conf_port_entry.split(":")
+
+            conf_host_ip, conf_host_port, conf_in_container_port = "0.0.0.0", None, None
+
+            if 1 == len(conf_port_entry_parts):
+                conf_in_container_port = conf_port_entry_parts[0]
+                #auto assigned host port
+                conf_host_port = "auto"
+            elif 2 == len(conf_port_entry_parts):
+                conf_host_port, conf_in_container_port = conf_port_entry_parts[0], conf_port_entry_parts[1]
+            elif 3 == len(conf_port_entry_parts):
+                conf_host_ip, conf_host_port, conf_in_container_port = conf_port_entry_parts[0], conf_port_entry_parts[1], conf_port_entry_parts[2]
+            else:
+                self.module.fail_json(msg="Wrong port configuration format: %s" % conf_port_entry)
+
+
+            # default to tcp if not specified, default docker behavior
+            if "/" not in conf_in_container_port:
+                conf_in_container_port = conf_in_container_port + "/tcp"
+
+            found = False
+
+            # check for matching port entry in existing container
+            if conf_in_container_port in container_ports:
+                container_host_info = container_ports[conf_in_container_port]
+                #nullcheck when port is exposed in Dockerfile but not mapped to host
+                if null != container_host_info:
+                    if "auto" == conf_host_port:
+                        #auto assigned host port, any entry is sufficient
+                        found = True
+                    else:
+                        for container_entry in container_host_info:
+                            if (conf_host_port == container_entry['HostPort'] and
+                                conf_host_ip == container_entry['HostIp']):
+                                found = True;
+                                break;
+
+            if not found:
+                return True
+
+        return False
+
+    def image_changed(self, existing_container):
+        existing_container_image = existing_container.get('Config', dict()).get('Image')
+        configuration_image = self.module.params.get('image')
+        return existing_container_image != configuration_image
+
+    def vol_changed(self, existing_container):
+        existing_container_volumes = existing_container.get('Volumes', dict())
+
+        # convert from list to dict
+        configuration_volumes = dict(vol.split(':') for vol in self.module.params.get('volumes') or [])
+        # reverse the input keys to match the container's structure
+        configuration_volumes = dict((v,k) for k,v in configuration_volumes.iteritems())
+
+        return existing_container_volumes != configuration_volumes
+
+    def env_changed(self, existing_container):
+        existing_container_envs = existing_container.get('Config', dict()).get('Env')
+
+        # convert from list to dict
+        existing_container_envs = dict(env_var.split('=', 1) for env_var in existing_container_envs)
+
+        configuration_envs = self.module.params.get('env') or {};
+
+        for k,v in existing_container_envs.iteritems():
+            if not k in configuration_envs:
+                return True
+            if v != configuration_envs[k]:
+                return True
+
+        return False
+
     def start_containers(self, containers):
         params = {
             'lxc_conf': self.lxc_conf,
@@ -903,8 +997,9 @@ def main():
                         break
 
                 # the named container is running, but with a
-                # different image or tag, so we stop it first
-                if existing_container and existing_container.get('Config', dict()).get('Image') != image:
+                # different image or configuration, so we stop it first
+                # comparing image registry, tag, env, ports and volumes
+                if manager.named_container_changed(existing_container):
                     manager.stop_containers([existing_container])
                     manager.remove_containers([existing_container])
                     running_containers = manager.get_running_containers()
