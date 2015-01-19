@@ -231,6 +231,13 @@ options:
     default: false
     aliases: []
     version_added: "1.9"
+  pull_latest:
+    description:
+      - Pull current version of image from registry before container create. Use when using single tag for different versions (eg. latest, production)
+    required: false
+    default: false
+    aliases: []
+    version_added: "1.9"
 
 author: Cove Schneider, Joshua Conner, Pavel Antonov
 requirements: [ "docker-py >= 0.3.0", "docker >= 0.10.0" ]
@@ -749,12 +756,9 @@ class DockerManager(object):
                 results.append(result)
 
             return results
-
-        try:
-            containers = do_create(count, params)
-        except:
-            resource = self.module.params.get('image')
-            image, tag = get_split_image_tag(resource)
+        
+        def do_pull(resource):
+            image, tag = get_split_image_tag(resource);
             if self.module.params.get('username'):
                 try:
                     self.client.login(
@@ -767,10 +771,21 @@ class DockerManager(object):
                     self.module.fail_json(msg="failed to login to the remote registry, check your username/password.")
             try:
                 self.client.pull(image, tag=tag, **extra_params)
-            except:
-                self.module.fail_json(msg="failed to pull the specified image: %s" % resource)
-            self.increment_counter('pull')
+                self.increment_counter('pull')
+            except Exception as e:
+                self.module.fail_json(msg="failed to pull the specified image: %s, error: %s" % (resource, e))
+
+            
+        if self.module.params.get('pull_latest'):
+            do_pull(self.module.params.get('image'))
+
+        try:
             containers = do_create(count, params)
+        except:
+            #on fail when docker image has not been pulled in this call, try to pull and create again
+            if not self.module.params.get('pull_latest'):
+                do_pull(self.module.params.get('image'))
+                containers = do_create(count, params)
 
         return containers
 
@@ -959,6 +974,7 @@ def main():
             name            = dict(default=None),
             net             = dict(default=None),
             insecure_registry = dict(default=False, type='bool'),
+            pull_latest     = dict(default=False, type='bool'),
         )
     )
 
